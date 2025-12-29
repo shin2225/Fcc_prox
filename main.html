@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>面心立方格子(FCC) 第n近接原子可視化</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a202c; color: white; font-family: 'Segoe UI', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 0; }
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            background: rgba(30, 41, 59, 0.9);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            max-width: 320px;
+            width: 90%;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+        }
+        .scrollable-list {
+            overflow-y: auto;
+            flex-grow: 1;
+            margin-top: 10px;
+            border-top: 1px solid #475569;
+            padding-top: 10px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        /* Scrollbar customization */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; }
+        .stat-label { color: #94a3b8; }
+        .stat-value { font-weight: bold; color: #f8fafc; }
+    </style>
+</head>
+<body>
+
+    <!-- 3D Canvas -->
+    <div id="canvas-container"></div>
+
+    <!-- UI Panel -->
+    <div id="ui-panel">
+        <h1 class="text-xl font-bold mb-4 text-blue-400">FCC 第n近接原子</h1>
+        
+        <div class="mb-6">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-semibold">近接次数 (n): <span id="n-display" class="text-green-400 text-lg">1</span></span>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="prev-btn" class="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1 rounded transition w-full">-</button>
+                <input type="range" id="n-slider" min="1" max="20" value="1" class="w-full accent-blue-500 cursor-pointer">
+                <button id="next-btn" class="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1 rounded transition w-full">+</button>
+            </div>
+        </div>
+
+        <div class="bg-slate-800 p-3 rounded mb-2">
+            <div class="stat-row">
+                <span class="stat-label">距離 (a=1):</span>
+                <span id="dist-display" class="stat-value">-</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">二乗距離 ($d^2$):</span>
+                <span id="sq-dist-display" class="stat-value">-</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">原子数 (個):</span>
+                <span id="count-display" class="stat-value">-</span>
+            </div>
+        </div>
+
+        <div class="text-xs text-gray-400 mb-1 flex justify-between">
+            <span>座標リスト (x, y, z)</span>
+            <span>※格子定数 a=1</span>
+        </div>
+        <div id="coord-list" class="scrollable-list text-gray-300">
+            <!-- Coordinates will be injected here -->
+        </div>
+
+        <div class="mt-4 text-xs text-gray-500 border-t border-gray-700 pt-2">
+            <div class="flex items-center gap-2 mb-1"><div class="w-3 h-3 rounded-full bg-red-500"></div> 中心原子 (0,0,0)</div>
+            <div class="flex items-center gap-2 mb-1"><div class="w-3 h-3 rounded-full bg-green-500"></div> 第n近接原子</div>
+            <div class="flex items-center gap-2"><div class="w-3 h-3 rounded-full bg-gray-600 opacity-50"></div> その他の原子</div>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const LATTICE_RANGE = 4; // Number of unit cells to generate in each direction
+        const MAX_N_NEIGHBORS = 30; // Maximum n to pre-calculate
+        
+        // --- State ---
+        let currentN = 1;
+        let neighborsData = []; // To store grouped neighbor data
+        let allAtoms = [];      // Flat list of all generated atom positions
+        let atomMesh;           // The InstancedMesh
+        let lineSegments;       // BufferGeometry for lines
+        
+        // --- 1. Math & Lattice Generation ---
+
+        function generateFCCLattice() {
+            const atoms = [];
+            
+            const basis = [
+                {x:0, y:0, z:0},
+                {x:0.5, y:0.5, z:0},
+                {x:0.5, y:0, z:0.5},
+                {x:0, y:0.5, z:0.5}
+            ];
+
+            const range = LATTICE_RANGE; 
+            
+            for (let x = -range; x <= range; x++) {
+                for (let y = -range; y <= range; y++) {
+                    for (let z = -range; z <= range; z++) {
+                        basis.forEach(b => {
+                            const px = x + b.x;
+                            const py = y + b.y;
+                            const pz = z + b.z;
+                            
+                            const d2 = px*px + py*py + pz*pz;
+                            if (d2 <= range * range * 1.5) { 
+                                atoms.push({ x: px, y: py, z: pz, d2: d2 });
+                            }
+                        });
+                    }
+                }
+            }
+
+            const epsilon = 0.00001;
+            const groups = new Map();
+            
+            atoms.forEach(atom => {
+                if (atom.d2 < epsilon) return; 
+                
+                const key = Math.round(atom.d2 * 10000); 
+                
+                if (!groups.has(key)) {
+                    groups.set(key, []);
+                }
+                groups.get(key).push(atom);
+            });
+
+            const sortedKeys = Array.from(groups.keys()).sort((a, b) => a - b);
+            
+            const result = sortedKeys.map(key => {
+                const atomsInGroup = groups.get(key);
+                const trueD2 = atomsInGroup[0].d2; 
+                return {
+                    order: 0, 
+                    d2: trueD2,
+                    distance: Math.sqrt(trueD2),
+                    count: atomsInGroup.length,
+                    atoms: atomsInGroup
+                };
+            });
+
+            result.forEach((group, index) => {
+                group.order = index + 1;
+            });
+
+            allAtoms = atoms;
+            neighborsData = result;
+        }
+
+        // --- 2. Three.js Setup ---
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111827); 
+        scene.fog = new THREE.Fog(0x111827, 5, 15);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(4, 3, 5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+        
+        const pointLight = new THREE.PointLight(0xffffff, 0.5);
+        camera.add(pointLight); 
+        scene.add(camera);
+
+        // --- 3. Visualization Construction ---
+
+        const dummy = new THREE.Object3D();
+        const material = new THREE.MeshStandardMaterial({ 
+            color: 0xffffff, 
+            roughness: 0.2, 
+            metalness: 0.5 
+        });
+        
+        // Reduced radius from 0.12 to 0.06 for better visibility
+        const geometry = new THREE.SphereGeometry(0.06, 16, 16);
+
+        // Function to create text sprites for axes
+        function createTextSprite(text, color) {
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = 64;
+            canvas.height = 64;
+            
+            context.font = "Bold 40px Arial";
+            context.fillStyle = color;
+            context.textAlign = "center";
+            context.textBaseline = "middle";
+            context.fillText(text, 32, 32);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.scale.set(0.5, 0.5, 0.5);
+            return sprite;
+        }
+
+        function initScene() {
+            generateFCCLattice();
+
+            // Set Slider Max AFTER data generation
+            const slider = document.getElementById('n-slider');
+            slider.max = Math.min(MAX_N_NEIGHBORS, neighborsData.length);
+
+            const totalAtoms = allAtoms.length;
+            atomMesh = new THREE.InstancedMesh(geometry, material, totalAtoms);
+            atomMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            scene.add(atomMesh);
+
+            allAtoms.forEach((atom, i) => {
+                dummy.position.set(atom.x, atom.y, atom.z);
+                dummy.updateMatrix();
+                atomMesh.setMatrixAt(i, dummy.matrix);
+            });
+            
+            const lineMat = new THREE.LineBasicMaterial({ 
+                color: 0x4ade80, 
+                transparent: true, 
+                opacity: 0.4 
+            });
+            const lineGeo = new THREE.BufferGeometry();
+            lineSegments = new THREE.LineSegments(lineGeo, lineMat);
+            scene.add(lineSegments);
+
+            // Axes with labels
+            const axesHelper = new THREE.AxesHelper(1.5);
+            scene.add(axesHelper);
+
+            // Labels
+            const labelX = createTextSprite("X", "#ff5555");
+            labelX.position.set(1.6, 0, 0);
+            scene.add(labelX);
+
+            const labelY = createTextSprite("Y", "#55ff55");
+            labelY.position.set(0, 1.6, 0);
+            scene.add(labelY);
+
+            const labelZ = createTextSprite("Z", "#5555ff");
+            labelZ.position.set(0, 0, 1.6);
+            scene.add(labelZ);
+
+            const gridHelper = new THREE.GridHelper(10, 10, 0x334155, 0x1e293b);
+            gridHelper.position.y = -2;
+            scene.add(gridHelper);
+
+            updateVisualization();
+        }
+
+        // --- 4. Update Logic ---
+
+        const colorCenter = new THREE.Color(0xef4444); // Red
+        const colorNeighbor = new THREE.Color(0x22c55e); // Green
+        const colorOther = new THREE.Color(0x475569); // Slate Gray
+        
+        function updateVisualization() {
+            // Data for current N
+            const targetGroup = neighborsData[currentN - 1]; 
+            
+            if (!targetGroup) return;
+
+            // 1. Update UI Text
+            document.getElementById('n-display').innerText = currentN;
+            document.getElementById('dist-display').innerText = targetGroup.distance.toFixed(4);
+            document.getElementById('sq-dist-display').innerText = targetGroup.d2.toFixed(4);
+            document.getElementById('count-display').innerText = targetGroup.count;
+
+            // 2. Update Coordinate List
+            const listEl = document.getElementById('coord-list');
+            listEl.innerHTML = '';
+            
+            const frag = document.createDocumentFragment();
+            targetGroup.atoms.forEach(atom => {
+                const div = document.createElement('div');
+                div.className = "py-1 border-b border-gray-700 hover:bg-slate-700 px-2 cursor-pointer transition text-xs";
+                const txt = `(${atom.x.toFixed(1)}, ${atom.y.toFixed(1)}, ${atom.z.toFixed(1)})`;
+                div.textContent = txt;
+                div.onclick = () => highlightSpecificAtom(atom); 
+                frag.appendChild(div);
+            });
+            listEl.appendChild(frag);
+
+            // 3. Update 3D Scene Colors
+            const targetAtomsSet = new Set(targetGroup.atoms); 
+            
+            let i = 0;
+            allAtoms.forEach(atom => {
+                if (Math.abs(atom.d2) < 0.0001) {
+                    atomMesh.setColorAt(i, colorCenter);
+                    dummy.position.set(0,0,0);
+                    dummy.scale.set(1.5, 1.5, 1.5); // Center atom slightly larger
+                    dummy.updateMatrix();
+                    atomMesh.setMatrixAt(i, dummy.matrix);
+                } 
+                else if (targetAtomsSet.has(atom)) {
+                    atomMesh.setColorAt(i, colorNeighbor);
+                    dummy.position.set(atom.x, atom.y, atom.z);
+                    dummy.scale.set(1.2, 1.2, 1.2); // Neighbors slightly larger
+                    dummy.updateMatrix();
+                    atomMesh.setMatrixAt(i, dummy.matrix);
+                } 
+                else {
+                    atomMesh.setColorAt(i, colorOther);
+                    dummy.position.set(atom.x, atom.y, atom.z);
+                    dummy.scale.set(0.5, 0.5, 0.5); // Others very small
+                    dummy.updateMatrix();
+                    atomMesh.setMatrixAt(i, dummy.matrix);
+                }
+                i++;
+            });
+            
+            atomMesh.instanceColor.needsUpdate = true;
+            atomMesh.instanceMatrix.needsUpdate = true;
+
+            // 4. Draw Lines from origin to neighbors
+            const positions = [];
+            targetGroup.atoms.forEach(atom => {
+                positions.push(0, 0, 0); 
+                positions.push(atom.x, atom.y, atom.z); 
+            });
+            lineSegments.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        }
+
+        function highlightSpecificAtom(atom) {
+            console.log("Selected:", atom);
+        }
+
+        // --- 5. Event Listeners ---
+
+        const slider = document.getElementById('n-slider');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+
+        function setN(val) {
+            val = parseInt(val);
+            if (val < 1) val = 1;
+            if (val > slider.max) val = slider.max;
+            currentN = val;
+            slider.value = val;
+            updateVisualization();
+        }
+
+        slider.addEventListener('input', (e) => setN(e.target.value));
+        
+        prevBtn.addEventListener('click', () => setN(currentN - 1));
+        nextBtn.addEventListener('click', () => setN(currentN + 1));
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- 6. Initialization ---
+
+        initScene();
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+    </script>
+</body>
+</html>
